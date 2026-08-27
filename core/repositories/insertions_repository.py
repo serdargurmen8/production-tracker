@@ -1,7 +1,7 @@
 ﻿"""
 core/repositories/insertions_repository.py
 --------------------------------------------
-Araya eklenen acil siparişlerin SQLite yönetimi ve denetim kaydı.
+Araya eklenen acil siparişlerin SQLite yönetimi, tuple dönüş desteği ve denetim kaydı.
 """
 
 import json
@@ -37,9 +37,9 @@ get_all_insertions = load_insertions
 get_insertions = load_insertions
 
 
-def append_insertion(*args, **kwargs) -> bool:
+def append_insertion(*args, **kwargs) -> tuple[bool, str]:
     """
-    Acil sipariş ekleme fonksiyonu (planning_screen ile tam uyumlu).
+    Acil sipariş ekleme fonksiyonu. (ok, msg) döner.
     """
     target_order = ""
     position = "before"
@@ -90,65 +90,79 @@ def append_insertion(*args, **kwargs) -> bool:
     if "insertion_id" in kwargs:
         insertion_id = str(kwargs["insertion_id"])
 
+    if not target_order:
+        return False, "Hedef sipariş belirtilmedi."
+
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     row_json = json.dumps(row, ensure_ascii=False) if isinstance(row, dict) else str(row)
 
-    with db_session() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            INSERT INTO insertions (id, target_order, position, row_data, created_by, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                target_order = excluded.target_order,
-                position = excluded.position,
-                row_data = excluded.row_data,
-                created_by = excluded.created_by,
-                created_at = excluded.created_at;
-            """,
-            (str(insertion_id), str(target_order), str(position), row_json, str(created_by), now_str)
-        )
-
     try:
-        write_audit_log(
-            entity_type="insertion",
-            entity_id=str(insertion_id),
-            action="add_insertion",
-            old_value="",
-            new_value=str(target_order),
-            detail={"target_order": target_order, "position": position, "row": row},
-            performed_by=created_by or "Planlama"
-        )
-    except Exception:
-        pass
-    return True
+        with db_session() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO insertions (id, target_order, position, row_data, created_by, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    target_order = excluded.target_order,
+                    position = excluded.position,
+                    row_data = excluded.row_data,
+                    created_by = excluded.created_by,
+                    created_at = excluded.created_at;
+                """,
+                (str(insertion_id), str(target_order), str(position), row_json, str(created_by), now_str)
+            )
+
+        try:
+            write_audit_log(
+                entity_type="insertion",
+                entity_id=str(insertion_id),
+                action="add_insertion",
+                old_value="",
+                new_value=str(target_order),
+                detail={"target_order": target_order, "position": position, "row": row},
+                performed_by=created_by or "Planlama"
+            )
+        except Exception:
+            pass
+
+        return True, f"Acil sipariş başarıyla eklendi (ID: {insertion_id})."
+    except Exception as e:
+        return False, f"Veritabanı hatası: {e}"
 
 
 add_insertion = append_insertion
 save_insertion = append_insertion
 
 
-def delete_insertion(insertion_id: str, performed_by: str = "", **kwargs) -> bool:
+def delete_insertion(insertion_id: str, performed_by: str = "", **kwargs) -> tuple[bool, str]:
     iid = str(insertion_id).strip()
-    with db_session() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM insertions WHERE id = ?;", (iid,))
-        success = cursor.rowcount > 0
+    if not iid:
+        return False, "Geçersiz sipariş ID'si."
 
-    if success:
-        try:
-            write_audit_log(
-                entity_type="insertion",
-                entity_id=iid,
-                action="delete_insertion",
-                old_value=iid,
-                new_value="",
-                detail={"deleted_id": iid},
-                performed_by=performed_by or "Planlama"
-            )
-        except Exception:
-            pass
-    return success
+    try:
+        with db_session() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM insertions WHERE id = ?;", (iid,))
+            success = cursor.rowcount > 0
+
+        if success:
+            try:
+                write_audit_log(
+                    entity_type="insertion",
+                    entity_id=iid,
+                    action="delete_insertion",
+                    old_value=iid,
+                    new_value="",
+                    detail={"deleted_id": iid},
+                    performed_by=performed_by or "Planlama"
+                )
+            except Exception:
+                pass
+            return True, "Acil sipariş başarıyla kaldırıldı."
+        return False, "Silinecek acil sipariş bulunamadı."
+    except Exception as e:
+        return False, f"Silme işlemi başarısız: {e}"
 
 
 remove_insertion = delete_insertion
