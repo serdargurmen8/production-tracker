@@ -2,11 +2,15 @@
 app.py
 --------
 Uygulama giriş noktası. 
-iPad/Safari Array.at polyfill desteği ve sekme optimizasyonu içerir.
+iPad/Safari Array.at polyfill desteği, sekme optimizasyonu ve 
+sekme titremesini (tab flicker) engelleyen anti-flicker motoru içerir.
 """
 
 import streamlit as st
 import streamlit.components.v1 as components
+
+from infra.db import init_database
+init_database()
 
 from core.repositories.excel_repository import (
     read_main_excel,
@@ -36,7 +40,25 @@ st.set_page_config(
     layout="wide"
 )
 
-# iPad ve Eski Safari (iOS < 15.4) için Array.prototype.at Polyfill
+# 1. Anti-Flicker CSS: Streamlit yükleme widget'ını ve progress bar'ı gizler
+st.markdown("""
+<style>
+    /* Streamlit durum widget'ını gizle */
+    div[data-testid="stStatusWidget"] {
+        visibility: hidden !important;
+        display: none !important;
+    }
+    /* Üstteki kırmızı/renkli yükleme çizgisini gizle */
+    .stProgress > div > div > div > div {
+        display: none !important;
+    }
+    header[data-testid="stHeader"] {
+        background-color: transparent !important;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# 2. Anti-Flicker JS + iPad Safari Array.at Polyfill
 components.html(
     """
     <script>
@@ -58,6 +80,15 @@ components.html(
                         if (n < 0 || n >= this.length) return undefined;
                         return this[n];
                     };
+                }
+                // Sekmedeki sürekli yanıp sönen yükleme durumunu (Flicker) dondurur
+                if (w && w.document) {
+                    var fixedTitle = "Sipariş Takip - Canlı Ekran";
+                    w.document.title = fixedTitle;
+                    Object.defineProperty(w.document, 'title', {
+                        set: function() {},
+                        get: function() { return fixedTitle; }
+                    });
                 }
             } catch(e) {}
         });
@@ -133,7 +164,8 @@ else:
         "Menü",
         tab_labels,
         horizontal=True,
-        label_visibility="collapsed"
+        label_visibility="collapsed",
+        key="main_active_tab"
     )
     st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
 

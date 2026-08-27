@@ -1,41 +1,48 @@
 ﻿"""
 core/repositories/audit_repository.py
 ---------------------------------------
-Denetim kayıtlarının okunması ve sıfırlanması işlemleri.
+Denetim kayıtlarının SQLite üzerinden okunması ve temizlenmesi.
 """
 
 import json
-import os
-
-from infra.config import AUDIT_LOG_FILE
-from infra.storage import json_read
+from infra.db import db_session
 
 
-def list_audit_logs() -> list:
-    """Tüm denetim kayıtlarını döner."""
-    logs = json_read(AUDIT_LOG_FILE, default=[])
-    return logs if isinstance(logs, list) else []
+def list_audit_logs() -> list[dict]:
+    with db_session() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, timestamp, entity_type, entity_id, action,
+                   old_value, new_value, detail, performed_by
+            FROM audit_logs
+            ORDER BY id DESC;
+            """
+        )
+        rows = cursor.fetchall()
+        logs = []
+        for row in rows:
+            item = dict(row)
+            if item.get("detail"):
+                try:
+                    item["detail"] = json.loads(item["detail"])
+                except Exception:
+                    pass
+            logs.append(item)
+        return logs
+
+
+get_audit_logs = list_audit_logs
+load_audit_logs = list_audit_logs
+read_audit_logs = list_audit_logs
 
 
 def clear_audit_logs() -> bool:
-    """
-    Denetim kaydı dosyasını geride hiçbir kayıt bırakmadan
-    tamamen sıfırlar (boş liste).
-    """
-    lock_file = AUDIT_LOG_FILE + ".lock"
-
-    if os.path.exists(lock_file):
-        try:
-            os.remove(lock_file)
-        except OSError:
-            pass
-
     try:
-        os.makedirs(os.path.dirname(AUDIT_LOG_FILE) or ".", exist_ok=True)
-
-        with open(AUDIT_LOG_FILE, "w", encoding="utf-8") as f:
-            json.dump([], f, ensure_ascii=False, indent=2)
-
+        with db_session() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM audit_logs;")
+            cursor.execute("DELETE FROM sqlite_sequence WHERE name = 'audit_logs';")
         return True
     except Exception:
         return False

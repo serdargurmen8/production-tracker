@@ -1,48 +1,69 @@
 ﻿"""
 core/repositories/cancelled_repository.py
----------------------------------------------
-İptal edilen siparişlerin yönetimi.
+-------------------------------------------
+İptal edilen siparişlerin SQLite yönetimi ve denetim kaydı.
 """
 
-import streamlit as st
-
-from infra.config import CANCELLED_FILE
-from infra.storage import json_read, json_write
+from datetime import datetime
+from infra.db import db_session
 from infra.audit import write_audit_log
-from core.domain.rules import normalize_order_id
 
 
-def load_cancelled_orders() -> list:
+def load_cancelled_orders() -> set[str]:
+    with db_session() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT sales_order FROM cancelled_orders;")
+        return {str(row["sales_order"]) for row in cursor.fetchall()}
+
+
+def is_order_cancelled(sales_order: str) -> bool:
+    so = str(sales_order).strip()
+    with db_session() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM cancelled_orders WHERE sales_order = ?;", (so,))
+        return cursor.fetchone() is not None
+
+
+def toggle_order_cancellation(sales_order: str, cancelled_by: str = "", performed_by: str = "", **kwargs) -> bool:
+    """Siparişin iptal durumunu tersine çevirir (İptalse açar, aktifse iptal eder)."""
+    so = str(sales_order).strip()
+    by_user = cancelled_by or performed_by or "Planlama"
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    with db_session() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM cancelled_orders WHERE sales_order = ?;", (so,))
+        is_cancelled = cursor.fetchone() is not None
+
+        if is_cancelled:
+            cursor.execute("DELETE FROM cancelled_orders WHERE sales_order = ?;", (so,))
+            action = "restore_order"
+            old_val, new_val = "cancelled", "active"
+        else:
+            cursor.execute(
+                "INSERT INTO cancelled_orders (sales_order, cancelled_at, cancelled_by) VALUES (?, ?, ?);",
+                (so, now_str, by_user)
+            )
+            action = "cancel_order"
+            old_val, new_val = "active", "cancelled"
+
     try:
-        data = json_read(CANCELLED_FILE, default=[])
-        return data if isinstance(data, list) else []
-    except Exception:
-        return []
-
-
-def toggle_order_cancellation(order_id: str) -> None:
-    norm_id = normalize_order_id(order_id)
-    performed_by = (st.session_state.get("user") or {}).get("username", "")
-
-    try:
-        with json_write(CANCELLED_FILE, default=[]) as data:
-            if norm_id in data:
-                data.remove(norm_id)
-                action = "uncancel"
-                old_value, new_value = "İptal", "Aktif"
-            else:
-                data.append(norm_id)
-                action = "cancel"
-                old_value, new_value = "Aktif", "İptal"
-
         write_audit_log(
-            entity_type="cancelled_orders",
-            order_id=norm_id,
+            entity_type="cancelled_order",
+            entity_id=so,
             action=action,
-            old_value=old_value,
-            new_value=new_value,
-            performed_by=performed_by,
+            old_value=old_val,
+            new_value=new_val,
+            detail={"sales_order": so},
+            performed_by=by_user
         )
+    except Exception:
+        pass
 
-    except Exception as e:
-        st.error(f"❌ İptal durumu güncellenemedi: {e}")
+    return not is_cancelled
+
+
+# Takma adlar
+get_cancelled_orders = load_cancelled_orders
+cancel_order = toggle_order_cancellation
+uncancel_order = toggle_order_cancellation

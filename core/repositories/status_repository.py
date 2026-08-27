@@ -1,57 +1,60 @@
 ﻿"""
 core/repositories/status_repository.py
----------------------------------------------
-Sipariş aşama durumlarının (Dikiş -> Sevk) yönetimi.
+----------------------------------------
+Sipariş aşama durumlarının SQLite üzerinden yönetimi ve loglanması.
 """
 
-import streamlit as st
-
-from infra.config import STATUS_FILE
-from infra.storage import json_read, json_write
+from infra.db import db_session
 from infra.audit import write_audit_log
-from core.domain.types import STATUS_STAGES
-from core.domain.rules import normalize_order_id
 
 
-def _stage_label(stage: int) -> str:
-    if not stage:
-        return "Başlamadı"
-    index = max(0, min(len(STATUS_STAGES), stage)) - 1
-    return STATUS_STAGES[index]
+def get_all_statuses() -> dict[str, int]:
+    with db_session() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT sales_order, stage FROM order_statuses;")
+        return {str(row["sales_order"]): int(row["stage"]) for row in cursor.fetchall()}
 
 
-def load_statuses() -> dict:
-    try:
-        data = json_read(STATUS_FILE, default={})
-        return {k: int(v) for k, v in data.items()} if isinstance(data, dict) else {}
-    except Exception as e:
-        st.warning(f"⚠️ Durum bilgisi okunamadı: {e}")
-        return {}
+load_statuses = get_all_statuses
+get_order_statuses = get_all_statuses
 
 
-def set_order_stage(order_id: str, new_stage: int) -> bool:
-    normalized = normalize_order_id(order_id)
-    new_stage = max(0, min(len(STATUS_STAGES), new_stage))
-    updated_by = (st.session_state.get("user") or {}).get("username", "")
+def set_order_stage(sales_order: str, stage: int, performed_by: str = "") -> bool:
+    so = str(sales_order).strip()
+    old_stage = 0
+    with db_session() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT stage FROM order_statuses WHERE sales_order = ?;", (so,))
+        row = cursor.fetchone()
+        if row:
+            old_stage = row["stage"]
 
-    try:
-        with json_write(STATUS_FILE, default={}) as data:
-            old_stage = int(data.get(normalized, 0))
-            if new_stage == 0:
-                data.pop(normalized, None)
-            else:
-                data[normalized] = new_stage
+        cursor.execute(
+            """
+            INSERT INTO order_statuses (sales_order, stage, updated_at)
+            VALUES (?, ?, datetime('now', 'localtime'))
+            ON CONFLICT(sales_order) DO UPDATE SET
+                stage = excluded.stage,
+                updated_at = excluded.updated_at;
+            """,
+            (so, int(stage))
+        )
 
-        if old_stage != new_stage:
+    if old_stage != stage:
+        try:
             write_audit_log(
-                entity_type="production_status",
-                order_id=normalized,
-                action="status_change",
-                old_value=_stage_label(old_stage),
-                new_value=_stage_label(new_stage),
-                performed_by=updated_by,
+                entity_type="order_status",
+                entity_id=so,
+                action="stage_update",
+                old_value=str(old_stage),
+                new_value=str(stage),
+                detail={"sales_order": so, "stage": stage},
+                performed_by=performed_by or "Operatör"
             )
-        return True
-    except Exception as e:
-        st.error(f"❌ Durum kaydedilemedi: {e}")
-        return False
+        except Exception:
+            pass
+    return True
+
+
+update_order_stage = set_order_stage
+save_order_stage = set_order_stage

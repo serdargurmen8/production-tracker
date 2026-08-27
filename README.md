@@ -1,130 +1,51 @@
-# Sipariş Takip - Canlı Ekran
+# 🧪 Production Tracker — Database Prototype (v1)
 
-## Klasör yapısı
+> ⚠️ **DİKKAT: DENEYSEL PROTOTİP (EXPERIMENTAL BUILD)**
+> Bu dizindeki kod tabanı, dosya tabanlı (JSON) veri kalıcılığı mimarisinden **merkezi ilişkisel veritabanı (SQLite)** mimarisine geçişin ilk çalışan prototipidir.
+> Kök dizindeki kararlı dosya tabanlı sürümden bağımsız olarak test ve geliştirme amacıyla izole edilmiştir.
 
-```
-siparis_takip/
-├── app.py                          # Giriş noktası (streamlit run app.py)
-├── infra/
-│   ├── config.py                    # Tüm env değişkenleri, sabit ayarlar (DATABASE_URL dahil)
-│   ├── db.py                        # SQLAlchemy engine / session (transaction yönetimi)
-│   └── models.py                    # ORM tabloları: orders, production_status,
-│                                     # insertions, cancelled_orders, users, audit_logs
-├── core/
-│   ├── domain/
-│   │   ├── types.py                 # STATUS_STAGES, STATUS_COLORS, REQUIRED_COLUMNS
-│   │   └── rules.py                 # normalize_order_id, apply_insertions,
-│   │                                 # compute_status, _row_bg_color (saf iş kuralları)
-│   ├── repositories/
-│   │   ├── excel_repository.py      # Excel okuma/doğrulama + veritabanına aktarma
-│   │   ├── insertions_repository.py # "Araya eklenen" acil siparişler (DB)
-│   │   ├── cancelled_repository.py  # İptal edilen siparişler (DB)
-│   │   └── status_repository.py     # Üretim aşaması takibi (DB)
-│   ├── services/
-│   │   └── pdf_service.py           # generate_pdf / clean_text
-│   └── use_cases/
-│       ├── html_builder.py          # "İş emri kartı" HTML tablo üretimi
-│       ├── live_screen.py           # Canlı Ekran sekmesi (herkes görür)
-│       └── planning_screen.py       # Planlama / acil sipariş sekmesi (sadece yönetici)
-├── ui/
-│   ├── auth.py                      # Yönetici giriş/çıkış formu (sidebar)
-│   └── setup_screens.py             # İlk kurulum + günlük excel güncelleme ekranları
-└── scripts/
-    └── migrate_legacy_to_db.py      # Eski Excel/JSON dosyalarını bir kerelik DB'ye aktarır
-```
-streamlit --version == 1.28 kullanımına uygundur.
+---
 
-## 🗄️ Veritabanı (Excel + JSON yerine)
+## 🎯 Prototipin Amacı ve Kapsamı
 
-Sipariş verisi, üretim durumları, araya eklenen acil siparişler ve
-iptal edilen siparişler artık dosya sisteminde değil, **PostgreSQL**
-(veya SQL Server) üzerinde tutulur:
+Uygulamanın çok kullanıcılı ortamda (tabletler, operatör terminalleri, planlama ekranları) aynı anda çalışırken yaşadığı dosya kilitleme (file locking), veri senkronizasyonu gecikmeleri ve veri tutarsızlığı risklerini çözmek için geliştirilmiştir.
 
-```
-Tablet 1 ─┐
-Tablet 2 ─┤
-Tablet 3 ─┼──► PostgreSQL / SQL Server
-Tablet 4 ─┘
-```
+* **Eşzamanlı Erişim (Concurrency):** SQLite **WAL (Write-Ahead Logging)** modu ile eşzamanlı okuma/yazma desteği.
+* **Katmanlı Mimari:** Repository katmanındaki tüm dosya I/O operasyonlarının parametrize SQL sorgularına dönüştürülmesi.
+* **Otomatik Göç (Data Migration):** Eski JSON dosyalarındaki verilerin (users.json, order_statuses.json, insertions.json, cancelled_orders.json, audit_log.json) ilk çalıştırmada otomatik olarak SQLite tablolarına aktarılması.
 
-| Eski dosya                  | Yeni tablo           |
-|------------------------------|-----------------------|
-| `gercek_siparisler.xlsx`     | `orders`              |
-| `siparis_durumlari.json`     | `production_status`   |
-| `araya_siparisler.json`      | `insertions`          |
-| `iptal_siparisler.json`      | `cancelled_orders`     |
-| *(yoktu)*                    | `users` *(ileride kişi bazlı giriş için)* |
-| *(yoktu)*                    | `audit_logs` *(kim, ne zaman, neyi değiştirdi)* |
+---
 
-Excel hâlâ **günlük veri girişi formatı** olarak kullanılır (ERP'den
-excel çıktısı almak değişmedi); tek fark, yüklenen excel dosyanın
-artık diske değil doğrudan veritabanına yazılmasıdır. Önceki gün
-girilen siparişler silinmez, `orders.is_current = false` yapılarak
-arşivlenir (eski `excel_arsiv/` klasörünün yerini alır).
+## 🧱 Veritabanı Şeması (data/production.db)
 
-### Kurulum
+Veritabanı başlatıldığında otomatik olarak şu tablolar oluşturulur ve indekslenir:
 
-1. Bir PostgreSQL veritabanı oluşturun ve bağlantı bilgisini
-   ortam değişkeni olarak ayarlayın:
+| Tablo Adı | Birincil Anahtar | Açıklama |
+| :--- | :--- | :--- |
+| users | username | Kullanıcı kimlik bilgileri, SHA-256 şifre hash\'leri, roller, aktiflik ve son giriş tarihi (last_login_at). |
+| order_statuses | sales_order | Siparişlerin istasyon bazlı durumları (Dikiş, Boya, Serigrafi, Sevk vb.) ve son güncelleme zaman damgası. |
+| insertions | id | Araya eklenen acil siparişlerin hedef sipariş numarası, konumu (before/after) ve satır JSON verisi. |
+| cancelled_orders | sales_order | İptal edilen sipariş kayıtları, iptal eden kullanıcı ve zamanı. |
+| audit_logs | id (Auto-inc) | Sistem genelinde yapılan tüm kritik işlemlerin denetim kaydı. |
 
-   ```bash
-   export DATABASE_URL="postgresql+psycopg2://kullanici:sifre@sunucu:5432/siparis_takip"
-   ```
+---
 
-   (SQL Server kullanmak isterseniz: `mssql+pyodbc://kullanici:sifre@sunucu/siparis_takip?driver=ODBC+Driver+17+for+SQL+Server`)
+## 🛠️ Mimari Değişiklikler ve İyileştirmeler
 
-2. Uygulamayı çalıştırın; tablolar ilk açılışta otomatik oluşturulur
-   (`infra/db.py` içindeki `init_db()`, `app.py` tarafından her
-   başlangıçta çağrılır — idempotenttir, var olan tabloları bozmaz).
+* **infra/db.py:** Bağlantı havuzu ve bağlam yöneticisi (db_session), WAL modu optimizasyonu, PRAGMA ayarları ve otomatik migrasyon motoru.
+* **infra/audit.py & core/repositories/audit_repository.py:** Tüm CRUD işlemlerinin (acil sipariş ekleme/çıkarma, aşama onayları, kullanıcı rolleri) denetim kaydına asenkron/hataya dayanıklı bağlanması.
+* **ui/auth.py:** SQLite repository ile tam senkronize rol tabanlı yetkilendirme sistemi.
+* **Anti-Flicker & Sekme Optimizasyonu (app.py):**
+  * 5 saniyelik otomatik canlı yenilemeler sırasında tarayıcı sekme başlığının ve favicon durumunun sürekli yükleme animasyonuna girmesini engelleyen JS/CSS motoru.
+  * Eski iOS/Safari sürümleri için Array.prototype.at polyfill entegrasyonu.
+  * Sekmeler arası geçişte veri kaybını önleyen main_active_tab oturum yönetimi.
 
-3. **Eski sistemden geçiyorsanız**, eski `gercek_siparisler.xlsx` ve
-   `.json` dosyalarınızı proje köküne koyup bir kereliğine şunu
-   çalıştırın:
+---
 
-   ```bash
-   export DATABASE_URL="postgresql+psycopg2://kullanici:sifre@sunucu:5432/siparis_takip"
-   python scripts/migrate_legacy_to_db.py
-   ```
+## 🚀 Prototipi Çalıştırma
 
-   Bu script eski verileri okuyup ilgili tablolara aktarır. Script
-   idempotent değildir; sadece bir kez çalıştırın.
+Prototip klasörünü bağımsız olarak test etmek için:
 
-### Neden bu değişiklik gerekliydi?
-
-Birden fazla tablet/kullanıcı aynı anda Excel + JSON dosyalarını
-değiştirdiğinde dosya kilitleri, eşzamanlı yazma çakışmaları, veri
-kaybı ve dosya bozulması riskleri oluşuyordu. `FileLock` bunu
-kısmen azaltıyordu ama Excel'i gerçek bir veritabanına dönüştürmüyordu.
-PostgreSQL'e geçişle birlikte:
-- Her satır/kayıt kendi transaction'ı içinde güvenle güncellenir,
-- Aynı siparişe aynı anda yazan işlemler veritabanı seviyesinde
-  otomatik sıraya girer (satır bazlı kilitleme), farklı siparişler
-  birbirini beklemez,
-- Tüm değişiklikler `audit_logs` tablosunda izlenebilir hâle gelir.
-
-## Çalıştırma
-
-```bash
-cd siparis_takip
-pip install -r requirements.txt
-export DATABASE_URL="postgresql+psycopg2://kullanici:sifre@sunucu:5432/siparis_takip"
-streamlit run "app.py dosyasının yolu"
-```
-
-`SETUP_KEY` ortam değişkenini ayarlamayı unutmayın; ayarlamazsanız
-kod içindeki test amaçlı varsayılan anahtar kullanılır. `SETUP_KEY`
-sadece veritabanında HİÇ kullanıcı yokken ilk yönetici (ADMIN)
-hesabını oluşturmak için bir kerelik kurulum anahtarıdır — eskiden
-herkesin paylaştığı `MASTER_PASSWORD`'ün yerini aldı. İlk ADMIN
-hesabı oluşturulduktan sonra herkes kendi kullanıcı adı/şifresiyle
-giriş yapar (bkz. "Kullanıcı Yönetimi" sekmesi); rollerin neye
-izin verdiği `core/domain/permissions.py` içinde tanımlıdır.
-
-## Neden bu bölünme?
-
-- **domain**: Hiçbir I/O yapmayan, saf veri/kural fonksiyonları — test etmesi en kolay katman.
-- **repositories**: Sadece "veriyi nereden okuyup nereye yazıyoruz" ile ilgilenir.
-- **services**: Tek başına anlamlı, yeniden kullanılabilir iş parçaları (örn. PDF üretimi).
-- **use_cases**: Bir ekranın uçtan uca senaryosunu yürütür (repository + domain + service'leri bir araya getirir).
-- **ui**: Streamlit'e özgü, tekrar kullanılabilir küçük ekran parçaları (giriş formu, kurulum ekranı).
-- **infra**: "Bu dosya nerede duruyor / bu ayar ne" sorularının tek cevabı.
+1. Prototip dizinine geçiş: `cd production_tracker_databasePrototype1`
+2. Önbellek temizliği: `Get-ChildItem -Path . -Filter '__pycache__' -Recurse | Remove-Item -Recurse -Force`
+3. Çalıştırma: `streamlit run app.py`

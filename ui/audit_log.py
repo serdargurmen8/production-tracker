@@ -2,16 +2,14 @@
 ui/audit_log.py
 ------------------
 Denetim kayıtlarını listeleyen ve yöneticilere geçmişi
-temizleme imkanı sunan ekran.
+temizleme imkanı sunan ekran (SQLite uyumlu).
 """
 
 import pandas as pd
 import streamlit as st
 
-from infra.config import AUDIT_LOG_FILE
-from infra.storage import json_read
 from ui.auth import can
-from core.repositories.audit_repository import clear_audit_logs
+from core.repositories.audit_repository import list_audit_logs, clear_audit_logs
 
 
 def render_audit_log_tab() -> None:
@@ -38,17 +36,17 @@ def render_audit_log_tab() -> None:
     # ---------------------------------------------------------
     # LOGLARI LİSTELEME
     # ---------------------------------------------------------
-    logs = json_read(AUDIT_LOG_FILE, default=[])
+    logs = list_audit_logs()
 
     if not logs:
         st.info("Kayıtlı işlem geçmişi bulunmuyor.")
         return
 
     df_logs = pd.DataFrame(logs)
-    if not df_logs.empty and "timestamp" in df_logs.columns:
-        df_logs = df_logs.iloc[::-1].reset_index(drop=True)
-    elif not df_logs.empty and "performed_at" in df_logs.columns:
-        df_logs = df_logs.iloc[::-1].reset_index(drop=True)
+
+    # id sütununu görselde gizleyelim
+    if "id" in df_logs.columns:
+        df_logs = df_logs.drop(columns=["id"])
 
     st.dataframe(
         df_logs,

@@ -1,170 +1,133 @@
 ﻿"""
 ui/auth.py
 ------------
-Kişi bazlı giriş/çıkış ve ilk kurulumda ilk ADMIN hesabının
-oluşturulması.
-
-Eskiden (MASTER_PASSWORD) herkes aynı şifreyi paylaşıyordu ve
-"siparişi kim değiştirdi?" sorusunun cevabı yoktu. Artık her
-kullanıcının kendi kullanıcı adı/şifresi ve rolü (core/domain/
-permissions.py) var; session_state.user bu bilgiyi tutar ve
-diğer tüm modüller kimin işlem yaptığını buradan öğrenir.
+Kullanıcı kimlik doğrulama, oturum (session state) yönetimi
+ve rol bazlı yetkilendirme modülü.
 """
 
-from typing import Optional
-
+import hashlib
 import streamlit as st
+from core.repositories.user_repository import (
+    authenticate,
+    create_user,
+    has_any_user,
+    find_user_by_username
+)
 
-from infra.config import SETUP_KEY
-from core.domain.permissions import ROLES, ROLE_LABELS, can as role_can
-from core.repositories.user_repository import authenticate, create_user, has_any_user
+ROLE_PERMISSIONS = {
+    "yonetici": ["all", "excel_upload", "upload_excel", "urgent_order", "cancel_order", "user_management", "view_audit_log", "audit_log", "stage_update"],
+    "admin": ["all", "excel_upload", "upload_excel", "urgent_order", "cancel_order", "user_management", "view_audit_log", "audit_log", "stage_update"],
+    "planlama": ["urgent_order", "cancel_order", "stage_update", "view_audit_log", "audit_log", "excel_upload", "upload_excel"],
+    "operator": ["stage_update"],
+    "izleyici": [],
+}
 
 
-# =============================================================
-# SESSION STATE YARDIMCILARI
-# =============================================================
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+
 def init_auth_session_state() -> None:
+    if "authenticated_user" not in st.session_state:
+        st.session_state["authenticated_user"] = None
+    if "username" not in st.session_state:
+        st.session_state["username"] = None
+    if "role" not in st.session_state:
+        st.session_state["role"] = None
 
-    if "user" not in st.session_state:
-        st.session_state.user = None
 
-
-def current_user() -> Optional[dict]:
-    return st.session_state.get("user")
+def get_current_user() -> dict | None:
+    return st.session_state.get("authenticated_user")
 
 
 def is_authenticated() -> bool:
-    return current_user() is not None
+    return st.session_state.get("authenticated_user") is not None
 
 
 def current_username() -> str:
-    user = current_user()
-    return user["username"] if user else ""
+    u = get_current_user()
+    return u.get("username", "Anonim") if u else "Anonim"
 
 
-def current_role() -> str:
-    user = current_user()
-    return user["role"] if user else ""
-
-
-def can(action: str) -> bool:
-    """Giriş yapmış kullanıcının belirtilen işlemi yapıp yapamayacağı."""
-
-    user = current_user()
-
+def can(permission: str) -> bool:
+    user = get_current_user()
     if not user:
         return False
+    role = str(user.get("role", "")).lower()
+    perms = ROLE_PERMISSIONS.get(role, [])
+    return "all" in perms or permission in perms
 
-    return role_can(user["role"], action)
+
+def login_user(username: str, password: str) -> tuple[bool, str]:
+    if not username.strip() or not password.strip():
+        return False, "Kullanıcı adı ve şifre boş bırakılamaz."
+
+    pwd_hash = hash_password(password.strip())
+    user = authenticate(username.strip(), password_hash=pwd_hash, password=password.strip())
+
+    if user:
+        st.session_state["authenticated_user"] = user
+        st.session_state["username"] = user.get("username")
+        st.session_state["role"] = user.get("role")
+        return True, "Giriş başarılı."
+
+    return False, "Kullanıcı adı veya şifre hatalı, ya da hesap pasif."
 
 
-# =============================================================
-# İLK KURULUM: HİÇ KULLANICI YOKSA İLK ADMIN HESABINI OLUŞTUR
-# =============================================================
+def logout() -> None:
+    for k in ["authenticated_user", "username", "role", "selected_tab", "main_active_tab"]:
+        if k in st.session_state:
+            del st.session_state[k]
+
+
+def render_login() -> None:
+    with st.sidebar:
+        if is_authenticated():
+            u = get_current_user()
+            st.markdown(f"👤 **{u.get('username')}** `({u.get('role')})`")
+            if st.button("🚪 Çıkış Yap", use_container_width=True):
+                logout()
+                st.rerun()
+        else:
+            st.markdown("### 🔑 Giriş Yap")
+            with st.form("sidebar_login_form"):
+                u = st.text_input("Kullanıcı Adı")
+                p = st.text_input("Şifre", type="password")
+                sub = st.form_submit_button("Giriş", type="primary", use_container_width=True)
+                if sub:
+                    ok, msg = login_user(u, p)
+                    if ok:
+                        st.rerun()
+                    else:
+                        st.error(msg)
+
+
 def render_first_admin_setup() -> None:
+    st.markdown("### 🛠️ İlk Yönetici Hesabını Oluşturun")
+    st.info("Sistemde kayıtlı kullanıcı bulunamadı. Lütfen ilk yöneticiyi belirleyin.")
 
-    st.markdown(
-        """
-        <div style="text-align:center; padding:40px 20px 20px 20px;">
-            <h1>📦 Sipariş Takip Sistemi</h1>
-            <p style="font-size:18px;">İlk kurulum: yönetici hesabı oluşturun</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    with st.form("setup_admin_form"):
+        u = st.text_input("Yönetici Kullanıcı Adı")
+        fn = st.text_input("Ad Soyad")
+        p = st.text_input("Şifre", type="password")
+        p2 = st.text_input("Şifre Tekrar", type="password")
+        sub = st.form_submit_button("Yöneticiyi Oluştur ve Başla", type="primary")
 
-    st.info(
-        "Sistemde henüz hiçbir kullanıcı yok. Devam etmek için "
-        "bir yönetici (ADMIN) hesabı oluşturun. Bu ekran sadece "
-        "veritabanında hiç kullanıcı yokken görünür."
-    )
-
-    with st.form("first_admin_setup_form", clear_on_submit=False):
-
-        setup_key = st.text_input(
-            "Kurulum anahtarı (SETUP_KEY)",
-            type="password",
-            help="Sunucuyu kuran kişiden alınan tek seferlik anahtar.",
-        )
-
-        username = st.text_input("Yönetici kullanıcı adı")
-
-        pw1 = st.text_input("Şifre", type="password")
-        pw2 = st.text_input("Şifre (tekrar)", type="password")
-
-        submitted = st.form_submit_button("Yönetici hesabını oluştur", type="primary")
-
-        if submitted:
-
-            if setup_key != SETUP_KEY:
-                st.error("❌ Kurulum anahtarı hatalı.")
-
-            elif not username.strip():
-                st.error("❌ Kullanıcı adı boş olamaz.")
-
-            elif pw1 != pw2:
-                st.error("❌ Şifreler eşleşmiyor.")
-
+        if sub:
+            if not u.strip() or not p.strip():
+                st.error("Kullanıcı adı ve şifre zorunludur.")
+            elif p != p2:
+                st.error("Şifreler birbiriyle eşleşmiyor.")
             else:
-
                 ok, msg = create_user(
-                    username=username,
-                    password=pw1,
-                    role="ADMIN",
-                    created_by="setup",
+                    username=u.strip(),
+                    password_hash=hash_password(p.strip()),
+                    role="yonetici",
+                    full_name=fn.strip(),
+                    created_by="Sistem"
                 )
-
                 if ok:
-                    st.success(msg + " Şimdi giriş yapabilirsiniz.")
+                    st.success("✅ Yönetici oluşturuldu! Soldaki menüden giriş yapabilirsiniz.")
                     st.rerun()
                 else:
                     st.error(msg)
-
-    st.stop()
-
-
-# =============================================================
-# GİRİŞ / ÇIKIŞ
-# =============================================================
-def render_login() -> None:
-    """
-    Sidebar'da kullanıcı adı/şifre girişi gösterir. Giriş başarılı
-    olursa session_state.user rolüyle birlikte doldurulur.
-    """
-
-    with st.sidebar:
-
-        st.markdown("### 🔑 Giriş")
-
-        user = current_user()
-
-        if user:
-
-            role_label = ROLE_LABELS.get(user["role"], user["role"])
-
-            st.success(f"**{user['username']}** ({role_label})")
-
-            if st.button("Çıkış yap", use_container_width=True):
-                st.session_state.user = None
-                st.rerun()
-
-        else:
-
-            with st.form("login_form", clear_on_submit=False):
-
-                username = st.text_input("Kullanıcı adı")
-                password = st.text_input("Şifre", type="password")
-
-                submitted = st.form_submit_button("Giriş yap", use_container_width=True)
-
-                if submitted:
-
-                    logged_in_user = authenticate(username, password)
-
-                    if logged_in_user:
-                        st.session_state.user = logged_in_user
-                        st.rerun()
-                    else:
-                        st.error("❌ Kullanıcı adı veya şifre hatalı, ya da hesap pasif.")
-
-            st.caption("Giriş yapmadan sisteme erişilemez.")
